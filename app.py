@@ -23,12 +23,11 @@ st.set_page_config(page_title="วิเคราะห์หุ้นไทย�
 
 st.markdown("""
 <style>
-  .stApp { background: #0e1117; }
   h1, h2, h3 { letter-spacing: .3px; }
   .pill { display:inline-block; padding:4px 12px; border-radius:999px;
           font-size:13px; font-weight:600; }
-  .ok  { background:#10341f; color:#41d77f; }
-  .off { background:#3a2a10; color:#e0a341; }
+  .ok  { background:#dcfce7; color:#15803d; }
+  .off { background:#fef3c7; color:#b45309; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -297,8 +296,12 @@ with tab2:
 
         if rows:
             tbl = pd.DataFrame(sorted(rows, key=lambda r: r["คะแนน"], reverse=True)[:top_n])
-            st.dataframe(tbl.style.background_gradient(subset=["คะแนน"], cmap="Greens"),
-                         use_container_width=True, hide_index=True)
+            st.dataframe(
+                tbl, use_container_width=True, hide_index=True,
+                column_config={
+                    "คะแนน": st.column_config.ProgressColumn(
+                        "คะแนน", min_value=0, max_value=100, format="%.0f"),
+                })
             st.caption("คะแนนเต็ม 100 · ยิ่งสูง = โมเมนตัมขาขึ้นยิ่งแรง")
 
             if ai_top > 0 and API_KEY:
