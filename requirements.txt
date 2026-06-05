@@ -2,3 +2,4 @@ streamlit
 yfinance
 anthropic
 pandas
+settrade-v2

@@ -34,6 +34,26 @@ st.markdown("""
 DEFAULT_UNIVERSE = ["PTT.BK", "AOT.BK", "KBANK.BK", "SCB.BK", "CPALL.BK",
                     "ADVANC.BK", "GULF.BK", "DELTA.BK", "BDMS.BK", "SCC.BK"]
 
+# ชุดใหญ่: หุ้นสภาพคล่องสูงหลายกลุ่ม (เป็นรายการที่คัดไว้ ไม่ใช่ดัชนี SET50/SET100
+# อย่างเป็นทางการ ซึ่งมีการปรับรายชื่อทุกไตรมาส — แก้ไข/เพิ่มได้ตามต้องการ)
+UNIVERSE_LARGE = [
+    "PTT.BK", "PTTEP.BK", "PTTGC.BK", "TOP.BK", "BCP.BK", "IRPC.BK",
+    "AOT.BK", "BEM.BK", "BTS.BK",
+    "KBANK.BK", "SCB.BK", "BBL.BK", "KTB.BK", "TTB.BK", "TISCO.BK", "KKP.BK",
+    "SCC.BK", "SCGP.BK",
+    "CPALL.BK", "CPF.BK", "CPN.BK", "CRC.BK", "CPAXT.BK", "HMPRO.BK",
+    "BJC.BK", "COM7.BK", "GLOBAL.BK",
+    "ADVANC.BK", "TRUE.BK", "INTUCH.BK",
+    "GULF.BK", "GPSC.BK", "EA.BK", "BGRIM.BK", "RATCH.BK", "EGCO.BK", "BANPU.BK",
+    "DELTA.BK", "KCE.BK", "HANA.BK",
+    "AMATA.BK", "WHA.BK",
+    "BDMS.BK", "BH.BK", "BCH.BK", "CHG.BK",
+    "MINT.BK", "CENTEL.BK", "ERW.BK",
+    "LH.BK", "AP.BK", "SPALI.BK",
+    "TU.BK", "OSP.BK", "CBG.BK", "M.BK",
+    "KTC.BK", "MTC.BK", "SAWAD.BK", "TIDLOR.BK", "IVL.BK",
+]
+
 
 # ============================================================
 #  API key (อ่านจาก Streamlit secrets)
@@ -51,17 +71,64 @@ API_KEY = get_api_key()
 
 
 # ============================================================
-#  ฟังก์ชันคำนวณ (เหมือนเวอร์ชันก่อนหน้า)
+#  แหล่งข้อมูลราคา: Settrade Open API (real-time) หรือ yfinance (ดีเลย์)
 # ============================================================
-@st.cache_data(ttl=300, show_spinner=False)
+def get_settrade_creds():
+    names = ["SETTRADE_APP_ID", "SETTRADE_APP_SECRET",
+             "SETTRADE_BROKER_ID", "SETTRADE_APP_CODE"]
+    vals = {}
+    for n in names:
+        v = None
+        try:
+            v = st.secrets.get(n)
+        except Exception:
+            pass
+        vals[n] = v or os.environ.get(n)
+    return vals if all(vals.values()) else None
+
+
+SETTRADE = get_settrade_creds()
+DATA_SOURCE = "Settrade Open API (real-time)" if SETTRADE else "yfinance (ดีเลย์ ~15 นาที)"
+
+
+@st.cache_resource(show_spinner=False)
+def get_investor():
+    from settrade_v2 import Investor
+    c = SETTRADE
+    return Investor(app_id=c["SETTRADE_APP_ID"], app_secret=c["SETTRADE_APP_SECRET"],
+                    app_code=c["SETTRADE_APP_CODE"], broker_id=c["SETTRADE_BROKER_ID"])
+
+
+def _pick(d, name):
+    """หา key แบบไม่สนตัวพิมพ์เล็ก-ใหญ่ (กันรูปแบบ response ต่างกัน)"""
+    for k in d:
+        if k.lower() == name:
+            return d[k]
+    raise KeyError(f"ไม่พบฟิลด์ '{name}' ใน response ของ Settrade")
+
+
+def _fetch_settrade(symbol, limit=250, interval="1d"):
+    sym = symbol.replace(".BK", "").replace("^", "").upper()  # PTT.BK -> PTT, ^SET.BK -> SET
+    r = get_investor().MarketData().get_candlestick(symbol=sym, interval=interval, limit=limit)
+    idx = pd.to_datetime(_pick(r, "time"), unit="s")
+    return pd.DataFrame({"Open": _pick(r, "open"), "High": _pick(r, "high"),
+                         "Low": _pick(r, "low"), "Close": _pick(r, "close"),
+                         "Volume": _pick(r, "volume")}, index=idx).dropna()
+
+
+@st.cache_data(ttl=60, show_spinner=False)
 def fetch_ohlcv(ticker, period="6mo", interval="1d"):
-    df = yf.download(ticker, period=period, interval=interval,
-                     auto_adjust=False, progress=False)
-    if df.empty:
+    if SETTRADE:
+        df = _fetch_settrade(ticker)
+    else:
+        df = yf.download(ticker, period=period, interval=interval,
+                         auto_adjust=False, progress=False)
+        if not df.empty and isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        df = df[["Open", "High", "Low", "Close", "Volume"]] if not df.empty else df
+    if df is None or df.empty:
         raise ValueError(f"ไม่พบข้อมูลของ {ticker}")
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-    return df[["Open", "High", "Low", "Close", "Volume"]].dropna()
+    return df.dropna()
 
 
 def ema(s, span): return s.ewm(span=span, adjust=False).mean()
@@ -208,7 +275,7 @@ def analyze_with_claude(payload, model="claude-sonnet-4-6"):
 #  ส่วนหน้าตา (UI)
 # ============================================================
 st.title("📊 วิเคราะห์หุ้นไทยด้วย AI")
-st.caption("ข้อมูลดีเลย์ ~15 นาที · เพื่อประกอบการตัดสินใจ ไม่ใช่คำแนะนำการลงทุน")
+st.caption(f"แหล่งข้อมูล: {DATA_SOURCE} · เพื่อประกอบการตัดสินใจ ไม่ใช่คำแนะนำการลงทุน")
 
 with st.sidebar:
     st.header("สถานะ")
@@ -218,6 +285,7 @@ with st.sidebar:
         st.markdown('<span class="pill off">โหมดดูตัวเลข (ยังไม่ได้ตั้ง API key)</span>', unsafe_allow_html=True)
         st.caption("ตั้ง ANTHROPIC_API_KEY ใน Settings → Secrets เพื่อเปิดใช้ AI")
     st.divider()
+    st.caption(f"แหล่งข้อมูล: {DATA_SOURCE}")
     st.caption("หุ้นในชุดสแกน:")
     st.caption(", ".join(t.replace(".BK", "") for t in DEFAULT_UNIVERSE))
 
@@ -269,18 +337,32 @@ with tab1:
 
 # ---------- แท็บ 2: สแกนโมเมนตัม ----------
 with tab2:
+    choice = st.radio("ชุดหุ้นที่จะสแกน",
+                      ["คัดมา 10 ตัว", f"สภาพคล่องสูง ~{len(UNIVERSE_LARGE)} ตัว", "กำหนดเอง"],
+                      horizontal=True)
+    if choice == "กำหนดเอง":
+        custom = st.text_input("พิมพ์สัญลักษณ์ คั่นด้วยจุลภาค เช่น PTT.BK, AOT.BK, KBANK.BK",
+                               value="PTT.BK, AOT.BK, KBANK.BK")
+        scan_list = [t.strip().upper() for t in custom.split(",") if t.strip()]
+    elif "สภาพคล่อง" in choice:
+        scan_list = UNIVERSE_LARGE
+    else:
+        scan_list = DEFAULT_UNIVERSE
+
     s1, s2 = st.columns(2)
-    top_n = s1.slider("แสดงกี่อันดับ", 1, 10, 10)
+    top_n = s1.slider("แสดงกี่อันดับ", 1, max(5, len(scan_list)), min(10, len(scan_list)))
     ai_top = s2.slider("ให้ AI วิเคราะห์กี่อันดับแรก (0 = ไม่ใช้)", 0, 5, 0,
                        disabled=not API_KEY)
+    if len(scan_list) > 20:
+        st.caption(f"⏳ สแกน {len(scan_list)} ตัว อาจใช้เวลาราว {len(scan_list)//3}–{len(scan_list)//2} วินาที")
 
     if st.button("เริ่มสแกน", type="primary", use_container_width=True):
         rows = []
         prog = st.progress(0.0, text="กำลังสแกน...")
         data = {}
-        for i, t in enumerate(DEFAULT_UNIVERSE, 1):
-            prog.progress(i/len(DEFAULT_UNIVERSE),
-                          text=f"กำลังสแกน {t.replace('.BK','')} ({i}/{len(DEFAULT_UNIVERSE)})")
+        for i, t in enumerate(scan_list, 1):
+            prog.progress(i/len(scan_list),
+                          text=f"กำลังสแกน {t.replace('.BK','')} ({i}/{len(scan_list)})")
             try:
                 df = fetch_ohlcv(t)
                 if len(df) >= 30:
