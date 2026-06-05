@@ -271,6 +271,12 @@ def analyze_with_claude(payload, model="claude-sonnet-4-6"):
     return "".join(b.text for b in msg.content if b.type == "text")
 
 
+@st.cache_data(ttl=900, show_spinner=False)
+def cached_analyze(symbol, as_of, payload):
+    """เรียก AI ครั้งเดียวต่อหุ้น/รอบเวลา แล้วเก็บผลไว้ (เปิดซ้ำไม่เสียค่า API เพิ่ม)"""
+    return analyze_with_claude(payload)
+
+
 # ============================================================
 #  ส่วนหน้าตา (UI)
 # ============================================================
@@ -286,8 +292,7 @@ with st.sidebar:
         st.caption("ตั้ง ANTHROPIC_API_KEY ใน Settings → Secrets เพื่อเปิดใช้ AI")
     st.divider()
     st.caption(f"แหล่งข้อมูล: {DATA_SOURCE}")
-    st.caption("หุ้นในชุดสแกน:")
-    st.caption(", ".join(t.replace(".BK", "") for t in DEFAULT_UNIVERSE))
+    st.caption(f"ชุดสแกนหลัก: หุ้นสภาพคล่องสูง ~{len(UNIVERSE_LARGE)} ตัว (หรือกำหนดเอง)")
 
 tab1, tab2 = st.tabs(["📈 วิเคราะห์รายตัว", "🔍 สแกนโมเมนตัม"])
 
@@ -338,59 +343,67 @@ with tab1:
 # ---------- แท็บ 2: สแกนโมเมนตัม ----------
 with tab2:
     choice = st.radio("ชุดหุ้นที่จะสแกน",
-                      ["คัดมา 10 ตัว", f"สภาพคล่องสูง ~{len(UNIVERSE_LARGE)} ตัว", "กำหนดเอง"],
+                      [f"สภาพคล่องสูง ~{len(UNIVERSE_LARGE)} ตัว", "กำหนดเอง"],
                       horizontal=True)
     if choice == "กำหนดเอง":
         custom = st.text_input("พิมพ์สัญลักษณ์ คั่นด้วยจุลภาค เช่น PTT.BK, AOT.BK, KBANK.BK",
                                value="PTT.BK, AOT.BK, KBANK.BK")
         scan_list = [t.strip().upper() for t in custom.split(",") if t.strip()]
-    elif "สภาพคล่อง" in choice:
-        scan_list = UNIVERSE_LARGE
     else:
-        scan_list = DEFAULT_UNIVERSE
+        scan_list = UNIVERSE_LARGE
 
-    s1, s2 = st.columns(2)
-    top_n = s1.slider("แสดงกี่อันดับ", 1, max(5, len(scan_list)), min(10, len(scan_list)))
-    ai_top = s2.slider("ให้ AI วิเคราะห์กี่อันดับแรก (0 = ไม่ใช้)", 0, 5, 0,
-                       disabled=not API_KEY)
+    top_n = st.slider("แสดงกี่อันดับ", 1, max(5, len(scan_list)), min(10, len(scan_list)))
     if len(scan_list) > 20:
         st.caption(f"⏳ สแกน {len(scan_list)} ตัว อาจใช้เวลาราว {len(scan_list)//3}–{len(scan_list)//2} วินาที")
 
     if st.button("เริ่มสแกน", type="primary", use_container_width=True):
         rows = []
-        prog = st.progress(0.0, text="กำลังสแกน...")
         data = {}
+        prog = st.progress(0.0, text="กำลังสแกน...")
         for i, t in enumerate(scan_list, 1):
             prog.progress(i/len(scan_list),
                           text=f"กำลังสแกน {t.replace('.BK','')} ({i}/{len(scan_list)})")
             try:
                 df = fetch_ohlcv(t)
                 if len(df) >= 30:
-                    data[t] = df
                     ind = add_indicators(df); sc, sig = momentum_score(ind)
-                    rows.append({"หุ้น": t.replace(".BK", ""), "คะแนน": sc,
-                                 "ราคา": round(float(ind["Close"].iloc[-1]), 2),
-                                 **sig})
+                    sym = t.replace(".BK", "")
+                    rows.append({"หุ้น": sym, "คะแนน": sc,
+                                 "ราคา": round(float(ind["Close"].iloc[-1]), 2), **sig})
+                    data[sym] = df
             except Exception:
                 pass
             time.sleep(0.3)
         prog.empty()
 
-        if rows:
-            tbl = pd.DataFrame(sorted(rows, key=lambda r: r["คะแนน"], reverse=True)[:top_n])
-            st.dataframe(
-                tbl, use_container_width=True, hide_index=True,
-                column_config={
-                    "คะแนน": st.column_config.ProgressColumn(
-                        "คะแนน", min_value=0, max_value=100, format="%.0f"),
-                })
-            st.caption("คะแนนเต็ม 100 · ยิ่งสูง = โมเมนตัมขาขึ้นยิ่งแรง")
+        ranked = sorted(rows, key=lambda r: r["คะแนน"], reverse=True)[:top_n]
+        payloads = {r["หุ้น"]: build_payload(add_indicators(data[r["หุ้น"]]), r["หุ้น"])
+                    for r in ranked}
+        st.session_state.scan = {"ranked": ranked, "payloads": payloads}
+        st.session_state.analyzed = set()   # ล้างรายการที่เคยกดวิเคราะห์ของรอบก่อน
 
-            if ai_top > 0 and API_KEY:
-                for r in sorted(rows, key=lambda r: r["คะแนน"], reverse=True)[:ai_top]:
-                    t = r["หุ้น"] + ".BK"
-                    with st.expander(f"📋 วิเคราะห์ {r['หุ้น']} (คะแนน {r['คะแนน']})"):
+    scan = st.session_state.get("scan")
+    if scan and scan["ranked"]:
+        st.dataframe(pd.DataFrame(scan["ranked"]),
+                     use_container_width=True, hide_index=True,
+                     column_config={"คะแนน": st.column_config.ProgressColumn(
+                         "คะแนน", min_value=0, max_value=100, format="%.0f")})
+        st.caption("คะแนนเต็ม 100 · ยิ่งสูง = โมเมนตัมขาขึ้นยิ่งแรง")
+
+        if API_KEY:
+            st.markdown("##### บทวิเคราะห์ AI — คลิกเปิดดูได้ทุกตัว")
+            st.caption("แต่ละตัวที่กดวิเคราะห์ใช้เครดิต API เล็กน้อย · เปิดซ้ำไม่เสียเพิ่ม")
+            analyzed = st.session_state.setdefault("analyzed", set())
+            for r in scan["ranked"]:
+                sym = r["หุ้น"]
+                with st.expander(f"{sym}  ·  คะแนน {r['คะแนน']}  ·  ราคา {r['ราคา']}"):
+                    if st.button("วิเคราะห์ด้วย AI", key=f"ai_{sym}"):
+                        analyzed.add(sym)
+                    if sym in analyzed:
                         with st.spinner("AI กำลังวิเคราะห์..."):
-                            st.markdown(analyze_with_claude(build_payload(add_indicators(data[t]), t)))
+                            p = scan["payloads"][sym]
+                            st.markdown(cached_analyze(sym, p["as_of"], p))
         else:
-            st.error("ดึงข้อมูลไม่ได้ ลองใหม่อีกครั้ง")
+            st.info("ตั้ง API key ใน Secrets เพื่อเปิดบทวิเคราะห์ AI")
+    elif scan is not None and not scan["ranked"]:
+        st.error("ดึงข้อมูลไม่ได้ ลองใหม่อีกครั้ง")
