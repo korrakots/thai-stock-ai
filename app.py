@@ -237,23 +237,41 @@ def momentum_score(df):
     return round(score, 1), sig
 
 
+def entry_now(df):
+    """True ถ้าราคาปัจจุบันอยู่ในจุดเข้าซื้อได้เลย (ไม่ต้องรอย่อ)."""
+    last = df.iloc[-1]
+    close = float(last["Close"])
+    e20, e50 = float(last["EMA20"]), float(last["EMA50"])
+    r = float(last["RSI14"]) if pd.notna(last["RSI14"]) else 50
+    uptrend = close > e20 > e50                     # แนวโน้มขาขึ้นเรียงตัวสวย
+    macd_bull = last["MACD"] > last["MACD_signal"]  # โมเมนตัมหนุน
+    in_zone = 50 <= r < 72                          # มีแรง แต่ยังไม่ overbought (เกิน 72 ควรรอย่อ)
+    ext = (close - e20) / e20 * 100                 # ราคาเหินจาก EMA20 กี่ %
+    not_extended = ext <= 7                          # ไม่ยืดเกินไป (ถ้ายืดมากควรรอย่อ)
+    hi10 = float(df.tail(10)["High"].max())
+    breakout = close >= hi10 * 0.995                 # กำลังทะลุ/ชนไฮ 10 วัน = เข้าได้เลย
+    return bool(uptrend and macd_bull and in_zone and (not_extended or breakout))
+
+
 ANALYSIS_PROMPT = """คุณเป็นผู้เชี่ยวชาญการลงทุนหุ้นไทย เน้นการเทรดทำกำไรระยะสั้น (swing trade ถือ 1-3 วัน เก็บ capital gain) วิเคราะห์จากค่าตัวเลข indicator ต่อไปนี้ (เป็นค่าจริง ไม่ใช่ภาพ) แล้วให้ข้อสรุป "สั้น กระชับ" เป็นภาษาไทย
 
-ตอบตามรูปแบบนี้เท่านั้น ห้ามยืดยาว แต่ละหัวข้อไม่เกิน 2-3 บรรทัด:
+สำคัญมาก: ต้องตอบ "ครบทุกหัวข้อด้านล่างเสมอ" ห้ามข้ามหัวข้อใดหัวข้อหนึ่งเด็ดขาด แม้สัญญาณจะเป็น "หลีกเลี่ยง" ก็ต้องกรอกทั้งกรณียังไม่มีของและกรณีมีของอยู่แล้ว แต่ละหัวข้อกระชับไม่เกิน 2-3 บรรทัด:
 
 【สัญญาณรวม】 เลือก 1 อย่าง: ✅ น่าสนใจ / ⏳ รอจังหวะ / ❌ หลีกเลี่ยง
 【เหตุผล】 อ้างอิง RSI, Stochastic (%K/%D), MACD, ตำแหน่งราคาเทียบ EMA/SMA, ปริมาณซื้อขายเทียบค่าเฉลี่ย และรูปแบบแท่งเทียนที่ตรวจพบ (ถ้ามี)
 
-【ถ้ายังไม่มีของ】
+【ถ้ายังไม่มีของ】 (ต้องตอบเสมอ)
   - ควรเข้าซื้ออย่างไร: "ซื้อได้เลยที่ราคาปัจจุบัน" หรือ "รอซื้อที่โซน (ระบุช่วงราคา)" หรือ "ยังไม่ควรเข้า"
   - Stop loss: อิงแนวรับทางเทคนิคที่ใกล้สุด (ราคา + % ขาดทุนโดยประมาณ)
   - เป้าทำกำไร: แนวต้านถัดไป (ราคา + % กำไรโดยประมาณ)
   - Risk:Reward โดยประมาณ
 
-【ถ้ามีของอยู่แล้ว】
+【ถ้ามีของอยู่แล้ว】 (ต้องตอบเสมอ)
   - ราคาขายทำกำไร: แนวต้านที่ควรขายล็อกกำไร (ราคา)
   - จุดตัดขาดทุน (stop loss): อิงแนวรับทางเทคนิคที่ใกล้สุด (ราคา)
   - คำแนะนำสั้น ๆ: "ถือต่อ" / "ทยอยขายลดพอร์ต" / "ขายออกเลย" พร้อมเหตุผล 1 บรรทัด
+
+【ความเห็นของ AI】 (ต้องตอบเสมอ) ตอบตรง ๆ ว่า "ถ้าเป็นผมและยึดตามสัญญาณเทคนิคล้วน ผมจะเข้าซื้อตัวนี้ตอนนี้" หรือ "ผมจะยังไม่เข้า" พร้อมเหตุผลสั้น 1-2 บรรทัด และระบุระดับความมั่นใจ (สูง / กลาง / ต่ำ)
 
 ปิดท้ายบรรทัดเดียว: เตือนว่าเป็นมุมมองเชิงเทคนิคเพื่อประกอบการตัดสินใจ ไม่ใช่คำแนะนำการลงทุน ความเสี่ยงเป็นของผู้ลงทุน
 
@@ -353,6 +371,7 @@ with tab2:
         scan_list = UNIVERSE_LARGE
 
     top_n = st.slider("แสดงกี่อันดับ", 1, max(5, len(scan_list)), min(10, len(scan_list)))
+    only_buynow = st.checkbox("แสดงเฉพาะหุ้นที่เข้าซื้อได้เลย (ไม่ต้องรอย่อ)")
     if len(scan_list) > 20:
         st.caption(f"⏳ สแกน {len(scan_list)} ตัว อาจใช้เวลาราว {len(scan_list)//3}–{len(scan_list)//2} วินาที")
 
@@ -369,17 +388,21 @@ with tab2:
                     ind = add_indicators(df); sc, sig = momentum_score(ind)
                     sym = t.replace(".BK", "")
                     rows.append({"หุ้น": sym, "คะแนน": sc,
-                                 "ราคา": round(float(ind["Close"].iloc[-1]), 2), **sig})
+                                 "ราคา": round(float(ind["Close"].iloc[-1]), 2),
+                                 "เข้าได้เลย": "✅" if entry_now(ind) else "—", **sig})
                     data[sym] = df
             except Exception:
                 pass
             time.sleep(0.3)
         prog.empty()
 
+        if only_buynow:
+            rows = [r for r in rows if r["เข้าได้เลย"] == "✅"]
         ranked = sorted(rows, key=lambda r: r["คะแนน"], reverse=True)[:top_n]
         payloads = {r["หุ้น"]: build_payload(add_indicators(data[r["หุ้น"]]), r["หุ้น"])
                     for r in ranked}
-        st.session_state.scan = {"ranked": ranked, "payloads": payloads}
+        st.session_state.scan = {"ranked": ranked, "payloads": payloads,
+                                 "only_buynow": only_buynow}
         st.session_state.analyzed = set()   # ล้างรายการที่เคยกดวิเคราะห์ของรอบก่อน
 
     scan = st.session_state.get("scan")
@@ -388,7 +411,8 @@ with tab2:
                      use_container_width=True, hide_index=True,
                      column_config={"คะแนน": st.column_config.ProgressColumn(
                          "คะแนน", min_value=0, max_value=100, format="%.0f")})
-        st.caption("คะแนนเต็ม 100 · ยิ่งสูง = โมเมนตัมขาขึ้นยิ่งแรง")
+        st.caption("คะแนนเต็ม 100 · ยิ่งสูง = โมเมนตัมขาขึ้นยิ่งแรง · ✅ ในคอลัมน์ 'เข้าได้เลย' = ราคาปัจจุบันเข้าซื้อได้โดยไม่ต้องรอย่อ")
+
 
         if API_KEY:
             st.markdown("##### บทวิเคราะห์ AI — คลิกเปิดดูได้ทุกตัว")
@@ -406,4 +430,7 @@ with tab2:
         else:
             st.info("ตั้ง API key ใน Secrets เพื่อเปิดบทวิเคราะห์ AI")
     elif scan is not None and not scan["ranked"]:
-        st.error("ดึงข้อมูลไม่ได้ ลองใหม่อีกครั้ง")
+        if scan.get("only_buynow"):
+            st.info("รอบนี้ไม่พบหุ้นที่ 'เข้าซื้อได้เลย' ตามเงื่อนไข — ลองเอาตัวกรองออก หรือสแกนใหม่ภายหลัง")
+        else:
+            st.error("ดึงข้อมูลไม่ได้ ลองใหม่อีกครั้ง")
