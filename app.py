@@ -273,10 +273,7 @@ ANALYSIS_PROMPT = """คุณเป็นผู้เชี่ยวชาญ�
   - จุดตัดขาดทุน (stop loss): อิงแนวรับทางเทคนิคที่ใกล้สุด (ราคา)
   - คำแนะนำสั้น ๆ: "ถือต่อ" / "ทยอยขายลดพอร์ต" / "ขายออกเลย" พร้อมเหตุผล 1 บรรทัด
 
-【ความเห็นของ AI】 (ต้องตอบเสมอ) ตอบตรง ๆ ว่า "ถ้าเป็นผมและยึดตามสัญญาณเทคนิคล้วน ผมจะเข้าซื้อตัวนี้ตอนนี้" หรือ "ผมจะยังไม่เข้า" พร้อมเหตุผลสั้น 1-2 บรรทัด และระบุระดับความมั่นใจตามเกณฑ์นี้อย่างเคร่งครัด (ห้ามตอบ "กลาง" เป็นค่าเริ่มต้นถ้าสัญญาณชัดไปทางใดทางหนึ่ง):
-  - "สูง" = สัญญาณส่วนใหญ่หนุนไปทางเดียวกันชัดเจน (เทรนด์ + RSI/Stochastic + MACD + วอลุ่ม + แท่งเทียน เห็นพ้องกัน)
-  - "กลาง" = สัญญาณผสม บางตัวหนุน บางตัวขัดแย้งกัน
-  - "ต่ำ" = สัญญาณขัดแย้งกันมาก อ่อนแรง หรือสวนทางแนวโน้ม
+【ความเห็นของ AI】 (ต้องตอบเสมอ) ตอบตรง ๆ ว่า "ถ้าเป็นผมและยึดตามสัญญาณเทคนิคล้วน ผมจะเข้าซื้อตัวนี้ตอนนี้" หรือ "ผมจะยังไม่เข้า" พร้อมเหตุผลสั้น 1-2 บรรทัด
 
 ปิดท้ายบรรทัดเดียว: เตือนว่าเป็นมุมมองเชิงเทคนิคเพื่อประกอบการตัดสินใจ ไม่ใช่คำแนะนำการลงทุน ความเสี่ยงเป็นของผู้ลงทุน
 
@@ -298,21 +295,6 @@ def analyze_with_claude(payload, model="claude-sonnet-4-6"):
 def cached_analyze(symbol, as_of, payload):
     """เรียก AI ครั้งเดียวต่อหุ้น/รอบเวลา แล้วเก็บผลไว้ (เปิดซ้ำไม่เสียค่า API เพิ่ม)"""
     return analyze_with_claude(payload)
-
-
-def parse_confidence(text):
-    """ดึงระดับความมั่นใจ (สูง/กลาง/ต่ำ) จากบทวิเคราะห์"""
-    import re
-    m = re.search(r"ความมั่นใจ[^\n]{0,25}?(สูง|กลาง|ต่ำ)", text)
-    if m:
-        return m.group(1)
-    for lvl in ("สูง", "กลาง", "ต่ำ"):
-        if lvl in text:
-            return lvl
-    return "—"
-
-
-CONF_RANK = {"สูง": 3, "กลาง": 2, "ต่ำ": 1, "—": 0}
 
 
 # ============================================================
@@ -424,7 +406,6 @@ with tab2:
         st.session_state.scan = {"ranked": ranked, "payloads": payloads,
                                  "only_buynow": only_buynow}
         st.session_state.analyzed = set()   # ล้างรายการที่เคยกดวิเคราะห์ของรอบก่อน
-        st.session_state.analyze_all = False
 
     scan = st.session_state.get("scan")
     if scan and scan["ranked"]:
@@ -437,30 +418,11 @@ with tab2:
 
         if API_KEY:
             st.markdown("##### บทวิเคราะห์ AI — คลิกเปิดดูได้ทุกตัว")
+            st.caption("แต่ละตัวที่กดวิเคราะห์ใช้เครดิต API เล็กน้อย · เปิดซ้ำไม่เสียเพิ่ม")
             analyzed = st.session_state.setdefault("analyzed", set())
-            ranked = scan["ranked"]
-
-            if st.button(f"🤖 วิเคราะห์ทุกตัว ({len(ranked)}) แล้วเรียงตามความมั่นใจ (สูง→ต่ำ)"):
-                st.session_state.analyze_all = True
-            st.caption("ปุ่มนี้จะให้ AI วิเคราะห์ทุกตัวที่แสดง (ใช้เครดิตตามจำนวน · เปิดซ้ำไม่เสียเพิ่ม)")
-
-            order = ranked
-            conf = {}
-            if st.session_state.get("analyze_all"):
-                with st.spinner("AI กำลังวิเคราะห์ทุกตัว..."):
-                    for r in ranked:
-                        sym = r["หุ้น"]; p = scan["payloads"][sym]
-                        conf[sym] = parse_confidence(cached_analyze(sym, p["as_of"], p))
-                        analyzed.add(sym)
-                order = sorted(ranked,
-                               key=lambda r: (CONF_RANK.get(conf.get(r["หุ้น"], "—"), 0), r["คะแนน"]),
-                               reverse=True)
-                st.caption("เรียงตามความมั่นใจของ AI (สูง→ต่ำ) แล้วตามด้วยคะแนนโมเมนตัม")
-
-            for r in order:
+            for r in scan["ranked"]:
                 sym = r["หุ้น"]
-                badge = f"  ·  มั่นใจ: {conf[sym]}" if sym in conf else ""
-                with st.expander(f"{sym}  ·  คะแนน {r['คะแนน']}  ·  ราคา {r['ราคา']}{badge}"):
+                with st.expander(f"{sym}  ·  คะแนน {r['คะแนน']}  ·  ราคา {r['ราคา']}"):
                     if st.button("วิเคราะห์ด้วย AI", key=f"ai_{sym}"):
                         analyzed.add(sym)
                     if sym in analyzed:
