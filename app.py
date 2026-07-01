@@ -34,24 +34,27 @@ st.markdown("""
 DEFAULT_UNIVERSE = ["PTT.BK", "AOT.BK", "KBANK.BK", "SCB.BK", "CPALL.BK",
                     "ADVANC.BK", "GULF.BK", "DELTA.BK", "BDMS.BK", "SCC.BK"]
 
-# ชุดใหญ่: หุ้นสภาพคล่องสูงหลายกลุ่ม (เป็นรายการที่คัดไว้ ไม่ใช่ดัชนี SET50/SET100
-# อย่างเป็นทางการ ซึ่งมีการปรับรายชื่อทุกไตรมาส — แก้ไข/เพิ่มได้ตามต้องการ)
+# ชุดใหญ่: ดัชนี SET100 อย่างเป็นทางการ (รอบ 1 ก.ค. – 31 ธ.ค. 2026, อัปเดต 17 มิ.ย. 2026)
+# = 100 ตัวสภาพคล่อง/มาร์เก็ตแคปสูงสุด (ครอบ SET50 ไว้แล้ว) · ตัด EA ออกตามต้องการ -> เหลือ 99 ตัว
+# SET ปรับรายชื่อปีละ 2 ครั้ง (มีผลต้น ม.ค. และ ต้น ก.ค.) — รอบหน้าแค่มาแทนลิสต์นี้
 UNIVERSE_LARGE = [
-    "PTT.BK", "PTTEP.BK", "PTTGC.BK", "TOP.BK", "BCP.BK", "IRPC.BK",
-    "AOT.BK", "BEM.BK", "BTS.BK",
-    "KBANK.BK", "SCB.BK", "BBL.BK", "KTB.BK", "TTB.BK", "TISCO.BK", "KKP.BK",
-    "SCC.BK", "SCGP.BK",
-    "CPALL.BK", "CPF.BK", "CPN.BK", "CRC.BK", "CPAXT.BK", "HMPRO.BK",
-    "BJC.BK", "COM7.BK", "GLOBAL.BK",
-    "ADVANC.BK", "TRUE.BK", "INTUCH.BK",
-    "GULF.BK", "GPSC.BK", "EA.BK", "BGRIM.BK", "RATCH.BK", "EGCO.BK", "BANPU.BK",
-    "DELTA.BK", "KCE.BK", "HANA.BK",
-    "AMATA.BK", "WHA.BK",
-    "BDMS.BK", "BH.BK", "BCH.BK", "CHG.BK",
-    "MINT.BK", "CENTEL.BK", "ERW.BK",
-    "LH.BK", "AP.BK", "SPALI.BK",
-    "TU.BK", "OSP.BK", "CBG.BK", "M.BK",
-    "KTC.BK", "MTC.BK", "SAWAD.BK", "TIDLOR.BK", "IVL.BK",
+    "AAV.BK", "ADVANC.BK", "AEONTS.BK", "AMATA.BK", "AOT.BK", "AP.BK",
+    "AURA.BK", "AWC.BK", "BA.BK", "BAM.BK", "BANPU.BK", "BBL.BK",
+    "BCH.BK", "BCP.BK", "BCPG.BK", "BDMS.BK", "BEM.BK", "BGRIM.BK",
+    "BH.BK", "BJC.BK", "BLA.BK", "BTG.BK", "BTS.BK", "CBG.BK",
+    "CCET.BK", "CENTEL.BK", "CHG.BK", "CK.BK", "COM7.BK", "CPALL.BK",
+    "CPF.BK", "CPN.BK", "CRC.BK", "DELTA.BK", "DOHOME.BK", "EGCO.BK",
+    "ERW.BK", "GFPT.BK", "GLOBAL.BK", "GPSC.BK", "GULF.BK", "GUNKUL.BK",
+    "HANA.BK", "HMPRO.BK", "ICHI.BK", "IRPC.BK", "IVL.BK", "JMT.BK",
+    "JTS.BK", "KBANK.BK", "KCE.BK", "KKP.BK", "KTB.BK", "KTC.BK",
+    "LH.BK", "M.BK", "MEGA.BK", "MINT.BK", "MOSHI.BK", "MRDIYT.BK",
+    "MTC.BK", "OR.BK", "OSP.BK", "PLANB.BK", "PR9.BK", "PRM.BK",
+    "PTG.BK", "PTT.BK", "PTTEP.BK", "PTTGC.BK", "QH.BK", "RATCH.BK",
+    "RCL.BK", "SAWAD.BK", "SCB.BK", "SCC.BK", "SCGP.BK", "SIRI.BK",
+    "SPALI.BK", "SPRC.BK", "STA.BK", "STECON.BK", "STGT.BK", "TASCO.BK",
+    "TCAP.BK", "TFG.BK", "THAI.BK", "THCOM.BK", "TIDLOR.BK", "TISCO.BK",
+    "TLI.BK", "TOA.BK", "TOP.BK", "TRUE.BK", "TTB.BK", "TU.BK",
+    "VGI.BK", "WHA.BK", "WHAUP.BK",
 ]
 
 
@@ -372,7 +375,16 @@ with tab2:
     else:
         scan_list = UNIVERSE_LARGE
 
-    top_n = st.slider("แสดงกี่อันดับ", 1, max(5, len(scan_list)), min(10, len(scan_list)))
+    # เลือกจำนวนอันดับที่จะแสดง — ใช้ selectbox (แตะเลือก) แทน slider (ลาก)
+    # เพื่อกันนิ้วไปโดนแถบเลื่อนตอนปัดหน้าจอบนมือถือ
+    n_total = max(1, len(scan_list))
+    _presets = [("10 อันดับแรก", 10), ("20 อันดับแรก", 20),
+                ("30 อันดับแรก", 30), ("50 อันดับแรก", 50)]
+    top_options = [lbl for lbl, v in _presets if v < n_total] + ["ทั้งหมด"]
+    default_idx = top_options.index("10 อันดับแรก") if "10 อันดับแรก" in top_options else len(top_options) - 1
+    top_choice = st.selectbox("แสดงกี่อันดับ", top_options, index=default_idx)
+    top_n = n_total if top_choice == "ทั้งหมด" else dict(_presets)[top_choice]
+
     only_buynow = st.checkbox("แสดงเฉพาะหุ้นที่เข้าซื้อได้เลย (ไม่ต้องรอย่อ)")
     if len(scan_list) > 20:
         st.caption(f"⏳ สแกน {len(scan_list)} ตัว อาจใช้เวลาราว {len(scan_list)//3}–{len(scan_list)//2} วินาที")
