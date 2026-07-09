@@ -57,6 +57,19 @@ UNIVERSE_LARGE = [
     "VGI.BK", "WHA.BK", "WHAUP.BK",
 ]
 
+# ชุด SET50 (50 ตัว) — สำหรับสแกนแบบกระชับ เฉพาะเมกะแคปสภาพคล่องสูงสุด
+UNIVERSE_SET50 = [
+    "ADVANC.BK", "AOT.BK", "AWC.BK", "BANPU.BK", "BBL.BK", "BCP.BK",
+    "BDMS.BK", "BEM.BK", "BH.BK", "BJC.BK", "CCET.BK", "COM7.BK",
+    "CPALL.BK", "CPF.BK", "CPN.BK", "CRC.BK", "DELTA.BK", "EGCO.BK",
+    "GPSC.BK", "GULF.BK", "HMPRO.BK", "IVL.BK", "KBANK.BK", "KKP.BK",
+    "KTB.BK", "KTC.BK", "LH.BK", "MINT.BK", "MRDIYT.BK", "MTC.BK",
+    "OR.BK", "OSP.BK", "PTT.BK", "PTTEP.BK", "PTTGC.BK", "RATCH.BK",
+    "SCB.BK", "SCC.BK", "SCGP.BK", "TCAP.BK", "TFG.BK", "THAI.BK",
+    "TIDLOR.BK", "TISCO.BK", "TLI.BK", "TOP.BK", "TRUE.BK", "TTB.BK",
+    "TU.BK", "WHA.BK",
+]
+
 
 # ============================================================
 #  API key (อ่านจาก Streamlit secrets)
@@ -150,9 +163,19 @@ def macd(close, fast=12, slow=26, signal=9):
     return line, sig, line - sig
 
 
-def stochastic(df, k=14, d=3):
-    lo = df["Low"].rolling(k).min(); hi = df["High"].rolling(k).max()
-    pk = 100*(df["Close"]-lo)/(hi-lo); return pk, pk.rolling(d).mean()
+def rsi_signal(rsi_series, period=14):
+    return rsi_series.rolling(period).mean()
+
+
+def bollinger(close, period=20, mult=2.0):
+    basis = close.rolling(period).mean(); sd = close.rolling(period).std()
+    return basis, basis + mult*sd, basis - mult*sd
+
+
+def atr(df, period=14):
+    h, l, c = df["High"], df["Low"], df["Close"]
+    tr = pd.concat([h - l, (h - c.shift()).abs(), (l - c.shift()).abs()], axis=1).max(axis=1)
+    return tr.ewm(alpha=1/period, adjust=False).mean()
 
 
 def detect_candlestick(df):
@@ -172,46 +195,84 @@ def detect_candlestick(df):
 
 def add_indicators(df):
     out = df.copy(); close = out["Close"]
-    out["EMA20"] = ema(close, 20); out["EMA50"] = ema(close, 50); out["SMA200"] = sma(close, 200)
-    out["RSI14"] = rsi(close, 14)
+    out["EMA20"] = ema(close, 20); out["EMA50"] = ema(close, 50)
+    out["EMA100"] = ema(close, 100); out["EMA200"] = ema(close, 200)
+    out["RSI14"] = rsi(close, 14); out["RSI_SIGNAL"] = rsi_signal(out["RSI14"], 14)
     ml, sl, hi = macd(close); out["MACD"] = ml; out["MACD_signal"] = sl; out["MACD_hist"] = hi
-    sk, sd = stochastic(out); out["STOCH_K"] = sk; out["STOCH_D"] = sd
+    bb_b, bb_u, bb_l = bollinger(close, 20, 2.0)
+    out["BB_BASIS"] = bb_b; out["BB_UPPER"] = bb_u; out["BB_LOWER"] = bb_l
+    out["ATR14"] = atr(out, 14)
     out["VOL_AVG5"] = out["Volume"].rolling(5).mean(); out["VOL_AVG20"] = out["Volume"].rolling(20).mean()
     return out
 
 
-def build_payload(df, ticker, tail=30):
+# timeframe -> (period, interval) สำหรับ yfinance
+TF_MAP = {"1W": ("5y", "1wk"), "1D": ("2y", "1d"), "1H": ("3mo", "1h")}
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_tf_indicators(ticker, tf):
+    """ดึงข้อมูล 1 timeframe แล้วคำนวณ indicator; คืน None ถ้าไม่มีข้อมูล (เช่น hourly ของบางตัว)"""
+    period, interval = TF_MAP[tf]
+    try:
+        df = fetch_ohlcv(ticker, period=period, interval=interval)
+    except Exception:
+        return None
+    if df is None or len(df) < 30:
+        return None
+    return add_indicators(df)
+
+
+def _sr_levels(df, f):
+    return {"recent_high_5": f(df.tail(5)["High"].max()),
+            "recent_low_5": f(df.tail(5)["Low"].min()),
+            "recent_high_20": f(df.tail(20)["High"].max()),
+            "recent_low_20": f(df.tail(20)["Low"].min())}
+
+
+def build_tf_snapshot(df):
+    """สรุปค่า indicator ล่าสุดของ 1 timeframe"""
     last = df.iloc[-1]; prev = df.iloc[-2]
-    chg = last["Close"]-prev["Close"]; chgp = chg/prev["Close"]*100
     def f(x, n=2): return None if pd.isna(x) else round(float(x), n)
-    recent = df.tail(tail).copy(); recent.index = recent.index.astype(str)
-    series = recent[["Close", "RSI14", "MACD", "MACD_signal"]].round(2)
-    levels = {"recent_high_week_5d": f(df.tail(5)["High"].max()),
-              "recent_low_week_5d": f(df.tail(5)["Low"].min()),
-              "recent_high_10d": f(df.tail(10)["High"].max()),
-              "recent_low_10d": f(df.tail(10)["Low"].min()),
-              "recent_high_30d": f(df.tail(tail)["High"].max()),
-              "recent_low_30d": f(df.tail(tail)["Low"].min())}
-    pats = detect_candlestick(df)
-    return {"ticker": ticker, "as_of": str(df.index[-1]),
+    close = float(last["Close"])
+    chgp = (close - float(prev["Close"])) / float(prev["Close"]) * 100
+    def side(a, b): return "above" if a > b else "below"
+    ema_stack = bool(last["EMA20"] > last["EMA50"] > last["EMA100"])
+    bb_pos = ("above_upper" if close > last["BB_UPPER"] else
+              "below_lower" if close < last["BB_LOWER"] else
+              "upper_half" if close >= last["BB_BASIS"] else "lower_half")
+    vol_ratio = (float(last["Volume"]) / float(last["VOL_AVG20"])
+                 if pd.notna(last["VOL_AVG20"]) and last["VOL_AVG20"] > 0 else None)
+    return {"close": f(close), "change_pct": f(chgp),
+            "rsi14": f(last["RSI14"]), "rsi_signal": f(last["RSI_SIGNAL"]),
+            "macd": f(last["MACD"], 4), "macd_signal": f(last["MACD_signal"], 4),
+            "macd_hist": f(last["MACD_hist"], 4),
+            "ema20": f(last["EMA20"]), "ema50": f(last["EMA50"]),
+            "ema100": f(last["EMA100"]), "ema200": f(last["EMA200"]),
+            "ema_stack_bullish": ema_stack,
+            "price_vs_ema20": side(close, last["EMA20"]),
+            "price_vs_ema50": side(close, last["EMA50"]),
+            "price_vs_ema200": side(close, last["EMA200"]),
+            "bb_basis": f(last["BB_BASIS"]), "bb_upper": f(last["BB_UPPER"]),
+            "bb_lower": f(last["BB_LOWER"]), "bb_position": bb_pos,
+            "atr14": f(last["ATR14"]),
+            "volume": int(last["Volume"]),
+            "vol_x_avg20": round(vol_ratio, 2) if vol_ratio is not None else None,
+            "candlestick": detect_candlestick(df) or ["ไม่พบรูปแบบเด่นชัด"],
+            "support_resistance": _sr_levels(df, f),
+            "entry_now": entry_now(df)}
+
+
+def build_multi_payload(ticker):
+    """ดึง 3 timeframe (week/day/hour) แล้วรวมเป็น payload เดียวสำหรับ AI"""
+    inds = {k: fetch_tf_indicators(ticker, tf)
+            for k, tf in [("week", "1W"), ("day", "1D"), ("hour", "1H")]}
+    tfs = {k: (build_tf_snapshot(v) if v is not None else None) for k, v in inds.items()}
+    as_of = str(inds["day"].index[-1]) if inds["day"] is not None else None
+    return {"ticker": ticker, "as_of": as_of,
             "fetched_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            "snapshot": {"open": f(last["Open"]), "high": f(last["High"]), "low": f(last["Low"]),
-                "close": f(last["Close"]), "change": f(chg), "change_pct": f(chgp),
-                "volume": int(last["Volume"]),
-                "avg_volume_5d": None if pd.isna(last["VOL_AVG5"]) else int(last["VOL_AVG5"]),
-                "avg_volume_20d": None if pd.isna(last["VOL_AVG20"]) else int(last["VOL_AVG20"]),
-                "volume_vs_avg20": ("สูงกว่าค่าเฉลี่ย" if not pd.isna(last["VOL_AVG20"]) and last["Volume"] > last["VOL_AVG20"] else "ต่ำกว่าค่าเฉลี่ย"),
-                "rsi14": f(last["RSI14"]), "stoch_k": f(last["STOCH_K"]), "stoch_d": f(last["STOCH_D"]),
-                "ema20": f(last["EMA20"]), "ema50": f(last["EMA50"]), "sma200": f(last["SMA200"]),
-                "macd": f(last["MACD"], 4), "macd_signal": f(last["MACD_signal"], 4), "macd_hist": f(last["MACD_hist"], 4),
-                "price_vs_ema20": "above" if last["Close"] > last["EMA20"] else "below",
-                "price_vs_ema50": "above" if last["Close"] > last["EMA50"] else "below",
-                "ema20_vs_ema50": "bullish_cross" if last["EMA20"] > last["EMA50"] else "bearish_cross",
-                "price_ext_from_ema20_pct": f((last["Close"] - last["EMA20"]) / last["EMA20"] * 100),
-                "entry_screen": "เข้าได้เลย" if entry_now(df) else "ควรรอย่อ"},
-            "candlestick_pattern": pats if pats else ["ไม่พบรูปแบบเด่นชัด"],
-            "support_resistance": levels,
-            "recent_series": json.loads(series.to_json(orient="index"))}
+            "timeframes": tfs,
+            "note_hour": None if tfs["hour"] else "ไม่มีข้อมูลรายชั่วโมง (yfinance) — วิเคราะห์จาก week/day"}
 
 
 def momentum_score(df):
@@ -219,6 +280,7 @@ def momentum_score(df):
     if close > last["EMA20"]: score += 15
     if close > last["EMA50"]: score += 10
     if last["EMA20"] > last["EMA50"]: score += 10
+    if pd.notna(last["EMA100"]) and last["EMA50"] > last["EMA100"]: score += 5
     if last["MACD"] > last["MACD_signal"]: score += 10
     if last["MACD_hist"] > 0: score += 5
     r_ = last["RSI14"]
@@ -227,9 +289,7 @@ def momentum_score(df):
         elif 70 < r_ <= 80: score += 8
         elif r_ > 80: score += 2
         sig["RSI"] = round(float(r_), 1)
-    if pd.notna(last["STOCH_K"]) and pd.notna(last["STOCH_D"]):
-        if last["STOCH_K"] > last["STOCH_D"] and last["STOCH_K"] < 80: score += 10
-        sig["Stoch %K"] = round(float(last["STOCH_K"]), 1)
+    if pd.notna(last["BB_BASIS"]) and close > last["BB_BASIS"]: score += 5
     if pd.notna(last["VOL_AVG20"]) and last["VOL_AVG20"] > 0:
         r = last["Volume"]/last["VOL_AVG20"]
         score += 10 if r >= 1.5 else 6 if r >= 1.2 else 3 if r >= 1.0 else 0
@@ -258,44 +318,48 @@ def entry_now(df):
     return bool(uptrend and macd_bull and in_zone and (not_extended or breakout))
 
 
-ANALYSIS_PROMPT = """คุณเป็นผู้เชี่ยวชาญการลงทุนหุ้นไทย เน้นการเทรดทำกำไรระยะสั้น (swing trade ถือ 1-3 วัน เก็บ capital gain) วิเคราะห์จากค่าตัวเลข indicator ต่อไปนี้ (เป็นค่าจริง ไม่ใช่ภาพ) แล้วให้ข้อสรุป "สั้น กระชับ" เป็นภาษาไทย
+MULTI_TF_PROMPT = """คุณเป็นผู้เชี่ยวชาญการเทรดหุ้นไทยแบบ swing (ถือ 1-3 วัน เก็บ capital gain)
+วิเคราะห์จากค่า indicator จริง 3 timeframe: สัปดาห์ (week) = เทรนด์ใหญ่, วัน (day) = ตั้ง setup, ชั่วโมง (hour) = จังหวะเข้า
+ถ้า hour เป็น null ให้ใช้ week + day แทน และระบุว่าไม่มีข้อมูลรายชั่วโมง
 
-สำคัญมาก: ต้องตอบ "ครบทุกหัวข้อด้านล่างเสมอ" ห้ามข้ามหัวข้อใดหัวข้อหนึ่งเด็ดขาด แม้สัญญาณจะเป็น "หลีกเลี่ยง" ก็ต้องกรอกทั้งกรณียังไม่มีของและกรณีมีของอยู่แล้ว แต่ละหัวข้อกระชับไม่เกิน 2-3 บรรทัด:
+indicator ที่ให้มาต่อ timeframe: EMA 20/50/100/200, Bollinger Bands(20,2), RSI14 + เส้น signal, MACD(12/26/9), ATR14, ปริมาณเทียบเฉลี่ย, แนวรับ-แนวต้าน, รูปแบบแท่งเทียน
 
+ให้น้ำหนักการวิเคราะห์: แนวรับ-แนวต้าน + ปริมาณ เป็นหลัก ส่วน RSI/MACD/EMA/BB/ATR เป็นตัวยืนยัน
+
+ตอบสั้น กระชับ เป็นภาษาไทย และต้องตอบ "ครบทุกหัวข้อเสมอ":
+
+【ภาพรวม 3 TF】 สรุปทีละ TF สั้นๆ: week (เทรนด์ใหญ่ ขึ้น/ลง/ออกข้าง) · day (setup) · hour (จังหวะ) — ถ้า TF ขัดแย้งกันให้ชี้ให้เห็น
 【สัญญาณรวม】 เลือก 1 อย่าง: ✅ น่าสนใจ / ⏳ รอจังหวะ / ❌ หลีกเลี่ยง
-【เหตุผล】 อ้างอิง RSI, Stochastic (%K/%D), MACD, ตำแหน่งราคาเทียบ EMA/SMA, ปริมาณซื้อขายเทียบค่าเฉลี่ย และรูปแบบแท่งเทียนที่ตรวจพบ (ถ้ามี)
+【เหตุผล】 อ้างอิงแนวรับ-แนวต้าน + ปริมาณเป็นหลัก เสริมด้วย RSI/MACD/EMA/BB/ATR
 
 【ถ้ายังไม่มีของ】 (ต้องตอบเสมอ)
-  - ควรเข้าซื้ออย่างไร: ให้สอดคล้องกับฟิลด์ "entry_screen" ในข้อมูล — ถ้า entry_screen = "เข้าได้เลย" ให้ตอบว่า "ซื้อได้เลยที่ราคาปัจจุบัน" (ห้ามบอกให้รอย่อ เว้นแต่มีเหตุผลทางเทคนิคหนักแน่นมากที่ต้องอธิบายชัด) / ถ้า entry_screen = "ควรรอย่อ" ให้ตอบ "รอซื้อที่โซน (ระบุช่วงราคา)" หรือ "ยังไม่ควรเข้า"
-  - Stop loss: อิงแนวรับทางเทคนิคที่ใกล้สุด (ราคา + % ขาดทุนโดยประมาณ)
-  - เป้าทำกำไร: แนวต้านถัดไป (ราคา + % กำไรโดยประมาณ)
-  - Risk:Reward โดยประมาณ
+  - เข้าอย่างไร: ให้สอดคล้องกับ entry_now ของ TF วัน — ถ้า day.entry_now = true ตอบ "เข้าได้เลยที่ราคาปัจจุบัน" / ถ้า false ระบุโซนราคาที่ควรรอ
+  - Stop loss: อิงแนวรับ TF วันที่ใกล้สุด (ราคา + % โดยประมาณ) และใช้ ATR ประกอบการวางระยะ
+  - เป้าทำกำไร: แนวต้านถัดไป (ราคา + %) · Risk:Reward โดยประมาณ
 
 【ถ้ามีของอยู่แล้ว】 (ต้องตอบเสมอ)
-  - ราคาขายทำกำไร: แนวต้านที่ควรขายล็อกกำไร (ราคา)
-  - จุดตัดขาดทุน (stop loss): อิงแนวรับทางเทคนิคที่ใกล้สุด (ราคา)
-  - คำแนะนำสั้น ๆ: "ถือต่อ" / "ทยอยขายลดพอร์ต" / "ขายออกเลย" พร้อมเหตุผล 1 บรรทัด
+  - ราคาขายทำกำไร (แนวต้าน) · จุด stop loss (แนวรับ) · คำแนะนำ: "ถือต่อ" / "ทยอยขาย" / "ขายออก" พร้อมเหตุผล 1 บรรทัด
 
-【ความเห็นของ AI】 (ต้องตอบเสมอ) ตอบตรง ๆ ว่า "ถ้าเป็นผมและยึดตามสัญญาณเทคนิคล้วน ผมจะเข้าซื้อตัวนี้ตอนนี้" หรือ "ผมจะยังไม่เข้า" พร้อมเหตุผลสั้น 1-2 บรรทัด
+【ความเห็นของ AI】 (ต้องตอบเสมอ) "ถ้าเป็นผมและยึดสัญญาณเทคนิคล้วน ผมจะเข้า/ไม่เข้าตอนนี้" พร้อมเหตุผล 1-2 บรรทัด
 
-ปิดท้ายบรรทัดเดียว: เตือนว่าเป็นมุมมองเชิงเทคนิคเพื่อประกอบการตัดสินใจ ไม่ใช่คำแนะนำการลงทุน ความเสี่ยงเป็นของผู้ลงทุน
+ปิดท้ายบรรทัดเดียว: เป็นมุมมองเชิงเทคนิคเพื่อประกอบการตัดสินใจ ไม่ใช่คำแนะนำการลงทุน ความเสี่ยงเป็นของผู้ลงทุน
 
 ข้อมูล:
 __DATA__
 """
 
 
-def analyze_with_claude(payload, model="claude-sonnet-4-6"):
+def analyze_with_claude(payload, prompt=MULTI_TF_PROMPT, model="claude-sonnet-4-6"):
     from anthropic import Anthropic
     client = Anthropic(api_key=API_KEY)
-    msg = client.messages.create(model=model, max_tokens=1500,
+    msg = client.messages.create(model=model, max_tokens=1600,
         messages=[{"role": "user",
-                   "content": ANALYSIS_PROMPT.replace("__DATA__", json.dumps(payload, ensure_ascii=False, indent=2))}])
+                   "content": prompt.replace("__DATA__", json.dumps(payload, ensure_ascii=False, indent=2))}])
     return "".join(b.text for b in msg.content if b.type == "text")
 
 
 @st.cache_data(ttl=900, show_spinner=False)
-def cached_analyze(symbol, as_of, payload):
+def cached_analyze(ticker, as_of, payload):
     """เรียก AI ครั้งเดียวต่อหุ้น/รอบเวลา แล้วเก็บผลไว้ (เปิดซ้ำไม่เสียค่า API เพิ่ม)"""
     return analyze_with_claude(payload)
 
@@ -326,54 +390,69 @@ with tab1:
     use_ai = c2.toggle("ให้ AI วิเคราะห์", value=bool(API_KEY), disabled=not API_KEY)
 
     if st.button("วิเคราะห์", type="primary", use_container_width=True):
+        tk = ticker.strip().upper()
         try:
-            with st.spinner("กำลังดึงข้อมูลและคำนวณ..."):
-                df = add_indicators(fetch_ohlcv(ticker.strip().upper()))
-                payload = build_payload(df, ticker.strip().upper())
-            snap = payload["snapshot"]
+            with st.spinner("กำลังดึงข้อมูล 3 timeframe (วัน/สัปดาห์/ชั่วโมง) และคำนวณ..."):
+                payload = build_multi_payload(tk)
+                day_ind = fetch_tf_indicators(tk, "1D")
 
-            m = st.columns(4)
-            m[0].metric("ราคาล่าสุด", f"{snap['close']:,.2f}",
-                        f"{snap['change_pct']:+.2f}%")
-            m[1].metric("RSI (14)", snap["rsi14"])
-            m[2].metric("Stochastic %K", snap["stoch_k"])
-            m[3].metric("วอลุ่ม vs เฉลี่ย", snap["volume_vs_avg20"])
+            if day_ind is None:
+                st.error("ดึงข้อมูลรายวันไม่ได้ ลองใหม่หรือตรวจสัญลักษณ์อีกครั้ง")
+            else:
+                d = payload["timeframes"]["day"]
+                m = st.columns(4)
+                m[0].metric("ราคาล่าสุด (วัน)", f"{d['close']:,.2f}", f"{d['change_pct']:+.2f}%")
+                m[1].metric("RSI (14)", d["rsi14"])
+                m[2].metric("ATR (14)", d["atr14"])
+                m[3].metric("วอลุ่ม x เฉลี่ย", d["vol_x_avg20"])
 
-            st.line_chart(df.tail(60)[["Close", "EMA20", "EMA50"]])
+                st.line_chart(day_ind.tail(80)[["Close", "EMA20", "EMA50", "EMA100", "EMA200"]])
 
-            cc = st.columns(2)
-            cc[0].markdown("**รูปแบบแท่งเทียน**\n\n" +
-                           "\n".join(f"- {p}" for p in payload["candlestick_pattern"]))
-            sr = payload["support_resistance"]
-            cc[1].markdown(
-                f"**แนวรับ/แนวต้าน**\n\n"
-                f"- แนวต้านสัปดาห์: {sr['recent_high_week_5d']}\n"
-                f"- แนวรับสัปดาห์: {sr['recent_low_week_5d']}\n"
-                f"- สูงสุด 30 วัน: {sr['recent_high_30d']}\n"
-                f"- ต่ำสุด 30 วัน: {sr['recent_low_30d']}")
+                st.markdown("##### สรุป 3 Timeframe")
+                cols = st.columns(3)
+                for col, (label, key) in zip(cols, [("🗓 สัปดาห์", "week"),
+                                                    ("📆 วัน", "day"), ("⏱ ชั่วโมง", "hour")]):
+                    tf = payload["timeframes"][key]
+                    if tf is None:
+                        col.markdown(f"**{label}**\n\n_ไม่มีข้อมูล_")
+                    else:
+                        srl = tf["support_resistance"]
+                        col.markdown(
+                            f"**{label}**\n\n"
+                            f"- ราคา: {tf['close']} ({tf['change_pct']:+.2f}%)\n"
+                            f"- RSI: {tf['rsi14']} / sig {tf['rsi_signal']}\n"
+                            f"- EMA: {'ขาขึ้นเรียงตัว' if tf['ema_stack_bullish'] else 'ไม่เรียงตัว'}\n"
+                            f"- BB: {tf['bb_position']}\n"
+                            f"- รับ/ต้าน (20): {srl['recent_low_20']} / {srl['recent_high_20']}\n"
+                            f"- วอลุ่ม x เฉลี่ย: {tf['vol_x_avg20']}\n"
+                            f"- เข้าได้เลย: {'✅' if tf['entry_now'] else '—'}")
+                if payload.get("note_hour"):
+                    st.caption("⚠️ " + payload["note_hour"])
 
-            if use_ai and API_KEY:
-                with st.spinner("AI กำลังวิเคราะห์..."):
-                    st.divider()
-                    st.subheader("ผลวิเคราะห์จาก Claude")
-                    st.markdown(analyze_with_claude(payload))
-            elif not API_KEY:
-                st.info("อยู่ในโหมดดูตัวเลข — ก๊อปตัวเลขด้านบนไปถาม Claude.ai ได้ "
-                        "หรือตั้ง API key เพื่อให้วิเคราะห์อัตโนมัติ")
+                if use_ai and API_KEY:
+                    with st.spinner("AI กำลังวิเคราะห์ 3 timeframe..."):
+                        st.divider()
+                        st.subheader("ผลวิเคราะห์จาก Claude (Multi-Timeframe)")
+                        st.markdown(cached_analyze(tk, payload["as_of"], payload))
+                elif not API_KEY:
+                    st.info("อยู่ในโหมดดูตัวเลข — ตั้ง API key ใน Secrets เพื่อให้ AI วิเคราะห์อัตโนมัติ")
         except Exception as e:
             st.error(f"เกิดข้อผิดพลาด: {e}")
 
 # ---------- แท็บ 2: สแกนโมเมนตัม ----------
 with tab2:
-    choice = st.radio("ชุดหุ้นที่จะสแกน",
-                      [f"สภาพคล่องสูง ~{len(UNIVERSE_LARGE)} ตัว", "กำหนดเอง"],
-                      horizontal=True)
-    if choice == "กำหนดเอง":
+    set_choice = st.radio("ชุดหุ้นที่จะสแกน",
+                          ["SET50 (50 ตัว)", f"SET100 (~{len(UNIVERSE_LARGE)} ตัว)", "กำหนดเอง"],
+                          horizontal=True, index=0)
+    if set_choice == "กำหนดเอง":
         custom = st.text_input("พิมพ์สัญลักษณ์ คั่นด้วยจุลภาค เช่น PTT.BK, AOT.BK, KBANK.BK",
                                value="PTT.BK, AOT.BK, KBANK.BK")
         scan_list = [t.strip().upper() for t in custom.split(",") if t.strip()]
+    elif set_choice.startswith("SET50"):
+        scan_list = UNIVERSE_SET50
     else:
         scan_list = UNIVERSE_LARGE
+    st.caption("สแกนจัดอันดับด้วยกราฟรายวัน (เร็ว) · กดเจาะลึกรายตัวแล้ว AI จะอ่าน 3 timeframe (วัน/สัปดาห์/ชั่วโมง)")
 
     # เลือกจำนวนอันดับที่จะแสดง — ใช้ selectbox (แตะเลือก) แทน slider (ลาก)
     # เพื่อกันนิ้วไปโดนแถบเลื่อนตอนปัดหน้าจอบนมือถือ
@@ -391,7 +470,6 @@ with tab2:
 
     if st.button("เริ่มสแกน", type="primary", use_container_width=True):
         rows = []
-        data = {}
         prog = st.progress(0.0, text="กำลังสแกน...")
         for i, t in enumerate(scan_list, 1):
             prog.progress(i/len(scan_list),
@@ -404,7 +482,6 @@ with tab2:
                     rows.append({"หุ้น": sym, "คะแนน": sc,
                                  "ราคา": round(float(ind["Close"].iloc[-1]), 2),
                                  "เข้าได้เลย": "✅" if entry_now(ind) else "—", **sig})
-                    data[sym] = df
             except Exception:
                 pass
             time.sleep(0.3)
@@ -413,10 +490,7 @@ with tab2:
         if only_buynow:
             rows = [r for r in rows if r["เข้าได้เลย"] == "✅"]
         ranked = sorted(rows, key=lambda r: r["คะแนน"], reverse=True)[:top_n]
-        payloads = {r["หุ้น"]: build_payload(add_indicators(data[r["หุ้น"]]), r["หุ้น"])
-                    for r in ranked}
-        st.session_state.scan = {"ranked": ranked, "payloads": payloads,
-                                 "only_buynow": only_buynow}
+        st.session_state.scan = {"ranked": ranked, "only_buynow": only_buynow}
         st.session_state.analyzed = set()   # ล้างรายการที่เคยกดวิเคราะห์ของรอบก่อน
 
     scan = st.session_state.get("scan")
@@ -435,12 +509,13 @@ with tab2:
             for r in scan["ranked"]:
                 sym = r["หุ้น"]
                 with st.expander(f"{sym}  ·  คะแนน {r['คะแนน']}  ·  ราคา {r['ราคา']}"):
-                    if st.button("วิเคราะห์ด้วย AI", key=f"ai_{sym}"):
+                    if st.button("วิเคราะห์ด้วย AI (3 TF)", key=f"ai_{sym}"):
                         analyzed.add(sym)
                     if sym in analyzed:
-                        with st.spinner("AI กำลังวิเคราะห์..."):
-                            p = scan["payloads"][sym]
-                            st.markdown(cached_analyze(sym, p["as_of"], p))
+                        with st.spinner("AI กำลังดึง 3 timeframe และวิเคราะห์..."):
+                            tk = sym + ".BK"
+                            p = build_multi_payload(tk)
+                            st.markdown(cached_analyze(tk, p["as_of"], p))
         else:
             st.info("ตั้ง API key ใน Secrets เพื่อเปิดบทวิเคราะห์ AI")
     elif scan is not None and not scan["ranked"]:
