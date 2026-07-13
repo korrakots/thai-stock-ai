@@ -5,6 +5,7 @@ app.py — แอปวิเคราะห์หุ้นไทยด้วย
 import os
 import json
 import time
+import gc
 from datetime import datetime, timezone
 
 import pandas as pd
@@ -132,7 +133,7 @@ def _fetch_settrade(symbol, limit=250, interval="1d"):
                          "Volume": _pick(r, "volume")}, index=idx).dropna()
 
 
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=60, show_spinner=False, max_entries=40)
 def fetch_ohlcv(ticker, period="6mo", interval="1d"):
     if SETTRADE:
         df = _fetch_settrade(ticker)
@@ -147,7 +148,7 @@ def fetch_ohlcv(ticker, period="6mo", interval="1d"):
     return df.dropna()
 
 
-@st.cache_data(ttl=120, show_spinner=False)
+@st.cache_data(ttl=120, show_spinner=False, max_entries=1)
 def fetch_batch(tickers, period="6mo", interval="1d"):
     """ดึงหลายตัวพร้อมกันเป็นก้อนเดียว -> ลดจำนวนครั้งที่เรียก yfinance (กัน rate limit + เบา RAM)
     คืน dict {ticker: DataFrame}; ตัวไหนไม่มีข้อมูลจะไม่อยู่ใน dict"""
@@ -171,11 +172,12 @@ def fetch_batch(tickers, period="6mo", interval="1d"):
     for t in tickers:
         try:
             sub = data[t] if isinstance(data.columns, pd.MultiIndex) else data
-            sub = sub[cols].dropna()
+            sub = sub[cols].dropna().astype("float32")   # float32 = ครึ่งหนึ่งของ float64
             if len(sub) >= 30:
                 out[t] = sub
         except Exception:
             pass
+    del data
     return out
 
 
@@ -242,7 +244,7 @@ def add_indicators(df):
 TF_MAP = {"1W": ("5y", "1wk"), "1D": ("2y", "1d"), "1H": ("3mo", "1h")}
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False, max_entries=12)
 def fetch_tf_indicators(ticker, tf):
     """ดึงข้อมูล 1 timeframe แล้วคำนวณ indicator; คืน None ถ้าไม่มีข้อมูล (เช่น hourly ของบางตัว)"""
     period, interval = TF_MAP[tf]
@@ -390,7 +392,7 @@ def analyze_with_claude(payload, prompt=MULTI_TF_PROMPT, model="claude-sonnet-4-
     return "".join(b.text for b in msg.content if b.type == "text")
 
 
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=900, show_spinner=False, max_entries=40)
 def cached_analyze(ticker, as_of, payload):
     """เรียก AI ครั้งเดียวต่อหุ้น/รอบเวลา แล้วเก็บผลไว้ (เปิดซ้ำไม่เสียค่า API เพิ่ม)"""
     return analyze_with_claude(payload)
@@ -499,10 +501,12 @@ with tab2:
     only_buynow = st.checkbox("แสดงเฉพาะหุ้นที่เข้าซื้อได้เลย (ไม่ต้องรอย่อ)")
 
     # ดึงเป็นก้อน (batch) + เพดานจำนวน + คืนหน่วยความจำ กันแอปล้มบน Streamlit Cloud ฟรี
-    BATCH_SIZE = 20
+    BATCH_SIZE = 10
     MAX_SCAN = 100
     if len(scan_list) > 20:
         st.caption(f"⏳ สแกน {min(len(scan_list), MAX_SCAN)} ตัว (ดึงทีละก้อน {BATCH_SIZE} ตัว) ใช้เวลาสักครู่")
+    if len(scan_list) > 55:
+        st.caption("💡 เครื่องฟรีของ Streamlit มี RAM จำกัด — ถ้าสแกนชุดใหญ่แล้วแอปล้ม แนะนำใช้ SET50 หรือสแกนทีละ ~30 ตัว")
 
     if st.button("เริ่มสแกน", type="primary", use_container_width=True):
         targets = scan_list[:MAX_SCAN]
@@ -530,9 +534,10 @@ with tab2:
                 except Exception:
                     pass
                 del df
-            del batch                            # คืนหน่วยความจำหลังจบแต่ละก้อน
-            time.sleep(0.5)
+            del batch; gc.collect()              # คืนหน่วยความจำหลังจบแต่ละก้อน
+            time.sleep(0.8)
         prog.empty()
+        gc.collect()
 
         if only_buynow:
             rows = [r for r in rows if r["เข้าได้เลย"] == "✅"]
