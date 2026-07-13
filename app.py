@@ -147,6 +147,38 @@ def fetch_ohlcv(ticker, period="6mo", interval="1d"):
     return df.dropna()
 
 
+@st.cache_data(ttl=120, show_spinner=False)
+def fetch_batch(tickers, period="6mo", interval="1d"):
+    """ดึงหลายตัวพร้อมกันเป็นก้อนเดียว -> ลดจำนวนครั้งที่เรียก yfinance (กัน rate limit + เบา RAM)
+    คืน dict {ticker: DataFrame}; ตัวไหนไม่มีข้อมูลจะไม่อยู่ใน dict"""
+    out = {}
+    cols = ["Open", "High", "Low", "Close", "Volume"]
+    if SETTRADE:  # Settrade ไม่มี batch — ดึงทีละตัว
+        for t in tickers:
+            try:
+                out[t] = _fetch_settrade(t)
+            except Exception:
+                pass
+        return out
+    try:
+        data = yf.download(list(tickers), period=period, interval=interval,
+                           auto_adjust=False, progress=False,
+                           group_by="ticker", threads=True)
+    except Exception:
+        return out
+    if data is None or data.empty:
+        return out
+    for t in tickers:
+        try:
+            sub = data[t] if isinstance(data.columns, pd.MultiIndex) else data
+            sub = sub[cols].dropna()
+            if len(sub) >= 30:
+                out[t] = sub
+        except Exception:
+            pass
+    return out
+
+
 def ema(s, span): return s.ewm(span=span, adjust=False).mean()
 def sma(s, w): return s.rolling(w).mean()
 
@@ -465,26 +497,41 @@ with tab2:
     top_n = n_total if top_choice == "ทั้งหมด" else dict(_presets)[top_choice]
 
     only_buynow = st.checkbox("แสดงเฉพาะหุ้นที่เข้าซื้อได้เลย (ไม่ต้องรอย่อ)")
+
+    # ดึงเป็นก้อน (batch) + เพดานจำนวน + คืนหน่วยความจำ กันแอปล้มบน Streamlit Cloud ฟรี
+    BATCH_SIZE = 20
+    MAX_SCAN = 100
     if len(scan_list) > 20:
-        st.caption(f"⏳ สแกน {len(scan_list)} ตัว อาจใช้เวลาราว {len(scan_list)//3}–{len(scan_list)//2} วินาที")
+        st.caption(f"⏳ สแกน {min(len(scan_list), MAX_SCAN)} ตัว (ดึงทีละก้อน {BATCH_SIZE} ตัว) ใช้เวลาสักครู่")
 
     if st.button("เริ่มสแกน", type="primary", use_container_width=True):
+        targets = scan_list[:MAX_SCAN]
+        if len(scan_list) > MAX_SCAN:
+            st.warning(f"สแกนเฉพาะ {MAX_SCAN} ตัวแรก (กันเครื่องล้ม) — ถ้าต้องการดูครบ แบ่งสแกนเป็นรอบ")
         rows = []
         prog = st.progress(0.0, text="กำลังสแกน...")
-        for i, t in enumerate(scan_list, 1):
-            prog.progress(i/len(scan_list),
-                          text=f"กำลังสแกน {t.replace('.BK','')} ({i}/{len(scan_list)})")
-            try:
-                df = fetch_ohlcv(t)
-                if len(df) >= 30:
+        done = 0
+        for start in range(0, len(targets), BATCH_SIZE):
+            chunk = tuple(targets[start:start + BATCH_SIZE])
+            batch = fetch_batch(chunk)          # ดึงทั้งก้อนในครั้งเดียว
+            for t in chunk:
+                done += 1
+                prog.progress(done / len(targets),
+                              text=f"กำลังสแกน {t.replace('.BK','')} ({done}/{len(targets)})")
+                df = batch.get(t)
+                if df is None or len(df) < 30:
+                    continue
+                try:
                     ind = add_indicators(df); sc, sig = momentum_score(ind)
                     sym = t.replace(".BK", "")
                     rows.append({"หุ้น": sym, "คะแนน": sc,
                                  "ราคา": round(float(ind["Close"].iloc[-1]), 2),
                                  "เข้าได้เลย": "✅" if entry_now(ind) else "—", **sig})
-            except Exception:
-                pass
-            time.sleep(0.3)
+                except Exception:
+                    pass
+                del df
+            del batch                            # คืนหน่วยความจำหลังจบแต่ละก้อน
+            time.sleep(0.5)
         prog.empty()
 
         if only_buynow:
